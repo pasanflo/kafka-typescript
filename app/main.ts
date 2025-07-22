@@ -1,143 +1,82 @@
-import net from "net";
+import * as net from 'net';
+import { ApiKeys, type RequestHeader, type SupportedVersion } from './types.js';
+import {
+  calculateResponseBufferSize,
+  parseInputBuffer,
+  writeSupportedApiVersions,
+} from './bufferUtils.js';
 
-enum ErrorCode {
-  NO_ERROR = 0,
-  UNSUPPORTED_VERSION = 35,
-}
+const HOST: string = '127.0.0.1';
+const PORT: number = parseInt(process.env.PORT || '9092', 10);
 
-enum ApiKey {
-  FETCH = 1,
-  API_VERSIONS = 18,
-  DescribeTopicPartitions = 75,
-}
+const supportedApiKeys = new Map<ApiKeys, SupportedVersion>([
+  [ApiKeys.DESCRIBE_TOPIC_PARTITIONS, { minVersion: 0, maxVersion: 0 }],
+  [ApiKeys.API_VERSIONS, { minVersion: 0, maxVersion: 4 }],
+]);
 
-const numberToHex = (number: number, bytes: number) => {
-  return number.toString(16).padStart(bytes * 2, "0");
-};
-
-const parseMessage = (data: Buffer<ArrayBufferLike>) => {
-  const uint8Array = new Uint8Array(data.buffer);
-
-  const messageSizeBuffer = uint8Array.slice(0, 4);
-  const apiKeyBuffer = uint8Array.slice(4, 6);
-  const apiVersionBuffer = uint8Array.slice(6, 8);
-  const correlationIdBuffer = uint8Array.slice(8, 12);
-  const clientIdLengthBuffer = uint8Array.slice(12, 14);
-  const clientIdLength = Buffer.from(clientIdLengthBuffer).readUintBE(0, 2);
-
-  let startIndex = 14;
-  let endIndex = startIndex + clientIdLength;
-
-  const clientIdBuffer = uint8Array.slice(startIndex, endIndex);
-  startIndex = endIndex;
-  endIndex += 1;
-
-  const __tagBuffer = uint8Array.slice(startIndex, endIndex);
-
-  startIndex = endIndex;
-  endIndex += 1;
-  const clientIdCompactLengthBuffer = uint8Array.slice(startIndex, endIndex);
-  const clientIdCompactLength = Buffer.from(
-    clientIdCompactLengthBuffer
-  ).readUintBE(0, 1);
-  startIndex = endIndex;
-  endIndex += clientIdCompactLength - 1;
-
-  const clientIdCompactStringBuffer = uint8Array.slice(startIndex, endIndex);
-  startIndex = endIndex;
-  endIndex += 1;
-
-  const clientSoftwareVersionLengthBuffer = uint8Array.slice(
-    endIndex,
-    endIndex + 2
-  );
-  startIndex = endIndex;
-  endIndex +=
-    Buffer.from(clientSoftwareVersionLengthBuffer).readUintBE(0, 2) - 1;
-
-  const clientSoftwareVersionBuffer = uint8Array.slice(startIndex, endIndex);
-
-  return {
-    messageSizeBuffer,
-    apiKeyBuffer,
-    apiVersionBuffer,
-    correlationIdBuffer,
-    clientIdBuffer,
-    clientIdCompactStringBuffer,
-    clientSoftwareVersionBuffer,
-  };
-};
-
-const processRequest = (data: Buffer<ArrayBufferLike>, socket: net.Socket) => {
-  const { correlationIdBuffer, apiKeyBuffer, apiVersionBuffer } =
-    parseMessage(data);
-
-  const apiKey = Buffer.from(apiKeyBuffer).readUintBE(
-    0,
-    apiKeyBuffer.length
-  ) as ApiKey;
-  const apiVersion = Buffer.from(apiVersionBuffer).readUintBE(
-    0,
-    apiVersionBuffer.length
-  );
-
-  const supportedAPIKeys = [
-    ApiKey.API_VERSIONS,
-    //   ApiKey.DescribeTopicPartitions,
-    ApiKey.FETCH,
-  ] as const;
-  const supportedAPIVersions: Record<ApiKey, Array<number>> = {
-    [ApiKey.FETCH]: [
-      0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17,
-    ],
-    [ApiKey.API_VERSIONS]: [0, 1, 2, 3, 4],
-    [ApiKey.DescribeTopicPartitions]: [0],
-  } as const;
-
-  let errorCode: ErrorCode;
-  if (!supportedAPIVersions[apiKey].includes(apiVersion)) {
-    errorCode = ErrorCode.UNSUPPORTED_VERSION;
-  } else {
-    errorCode = ErrorCode.NO_ERROR;
+function validateApiVersion(apiKey: number, apiVersion: number): boolean {
+  if (!supportedApiKeys.has(apiKey)) {
+    return false;
   }
 
-  const errorCodeBuffer = Buffer.from(numberToHex(errorCode, 2), "hex");
-  const supportedAPIsLengthBuffer = Buffer.from(
-    numberToHex(supportedAPIKeys.length + 1, 1),
-    "hex"
-  );
-  const throttleTimeBuffer = Buffer.from(numberToHex(0, 4), "hex");
-  const tagBuffer = Buffer.from(numberToHex(0, 1), "hex");
+  const supportedApiKey = supportedApiKeys.get(apiKey)!;
+  const { minVersion, maxVersion } = supportedApiKey;
 
-  const responseBuffer = Buffer.concat([
-    correlationIdBuffer,
-    errorCodeBuffer,
-    supportedAPIsLengthBuffer,
-    supportedAPIKeys.reduce((acc, apiKey) => {
-      const minVersion = supportedAPIVersions[apiKey][0];
-      const maxVersion =
-        supportedAPIVersions[apiKey][supportedAPIVersions[apiKey].length - 1];
+  return apiVersion >= minVersion && apiVersion <= maxVersion;
+}
 
-      return Buffer.concat([
-        acc,
-        Buffer.from(numberToHex(apiKey, 2), "hex"),
-        Buffer.from(numberToHex(minVersion, 2), "hex"),
-        Buffer.from(numberToHex(maxVersion, 2), "hex"),
-        tagBuffer,
-      ]);
-    }, Buffer.from([])),
-    throttleTimeBuffer,
-    tagBuffer,
-  ]);
+const server: net.Server = net.createServer((connection: net.Socket) => {
+  connection.on('data', (input: Buffer) => {
+    console.log('Input buffer ', input);
 
-  const responseMessageSize = Buffer.alloc(4);
-  responseMessageSize.writeUInt32BE(responseBuffer.length, 0);
+    const { correlationId, apiKey, apiVersion } = parseInputBuffer(input);
 
-  socket.write(Buffer.concat([responseMessageSize, responseBuffer]));
-};
+    const errorCode = validateApiVersion(apiKey, apiVersion) ? 0 : 35;
 
-const server: net.Server = net.createServer((socket: net.Socket) => {
-  socket.on("data", (data) => processRequest(data, socket));
+    // Construct output buffer
+
+    const totalBufferSize = calculateResponseBufferSize(supportedApiKeys);
+
+    console.log('Buffer size', totalBufferSize);
+
+    const output: Buffer = Buffer.alloc(totalBufferSize);
+
+    let offset = 0;
+
+    // Write message size (4 bytes). This is the total buffer size minus the 4 bytes allocated for the message size.
+    const messageSize = totalBufferSize - 4;
+
+    output.writeUint32BE(messageSize);
+    offset += 4;
+
+    // Write correlation ID (4 bytes)
+    output.writeUint32BE(correlationId, offset);
+    offset += 4;
+
+    // Write error code (2 bytes)
+    output.writeUInt16BE(errorCode, offset);
+    offset += 2;
+
+    // Write API versions
+    offset = writeSupportedApiVersions(supportedApiKeys, output, offset);
+
+    // Write throttle time (4 bytes)
+    output.writeUint32BE(0, offset);
+    offset += 4;
+
+    // Write tag buffer (1 byte)
+    output.writeUInt8(0, offset);
+
+    console.log('Output buffer', output);
+
+    // Write response to client
+    connection.write(output);
+  });
+
+  connection.on('end', () => {
+    console.log('Client disconnected');
+  });
 });
 
-server.listen(9092, "127.0.0.1");
+server.listen(PORT, HOST);
+console.log(`Listening on port ${PORT}`);
