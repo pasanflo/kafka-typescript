@@ -1,36 +1,21 @@
-import * as net from 'net';
-import { parseRequest } from './bufferUtils.js';
-import { HOST, PORT, supportedApiKeys } from './global.js';
-import { handleUnsupportedVersion } from './handlers/unsupportedVersion.js';
-
-function validateApiVersion(apiKey: number, apiVersion: number): boolean {
-  if (!supportedApiKeys.has(apiKey)) {
-    return false;
-  }
-
-  const supportedApiKey = supportedApiKeys.get(apiKey)!;
-  const { minVersion, maxVersion } = supportedApiKey;
-
-  return apiVersion >= minVersion && apiVersion <= maxVersion;
-}
+import net from "net";
+import { KafkaRequestHandlerCenter } from "./models/request_handlers/request_handler_center";
+import { APIVersionRequestHandler } from "./models/request_handlers/api_version_request_handler";
+import { DescribeTopicPartitionRequestHandler } from "./models/request_handlers/describe_topic_partition_request_handler";
+import { FetchRequestHandler } from "./models/request_handlers/fetch_request_handler";
 
 const server: net.Server = net.createServer((connection: net.Socket) => {
-  connection.on('data', (input: Buffer) => {
-    const { correlationId, apiKey, apiVersion, body } = parseRequest(input);
+  const requestHandlerCenter = new KafkaRequestHandlerCenter();
+  requestHandlerCenter
+    .registerHandler(new APIVersionRequestHandler())
+    .registerHandler(new DescribeTopicPartitionRequestHandler())
+    .registerHandler(new FetchRequestHandler());
 
-    if (!validateApiVersion(apiKey, apiVersion)) {
-      handleUnsupportedVersion(connection, correlationId);
-      return;
-    }
-
-    const api = supportedApiKeys.get(apiKey)!;
-    api.handler(connection, correlationId, body);
-  });
-
-  connection.on('end', () => {
-    console.log('Client disconnected');
+  // Handle connection
+  connection.on("data", (data: Buffer) => {
+    const response = requestHandlerCenter.handleRequest(data);
+    connection.write(response);
   });
 });
 
-server.listen(PORT, HOST);
-console.log(`Listening on port ${PORT}`);
+server.listen(9092, "127.0.0.1");
