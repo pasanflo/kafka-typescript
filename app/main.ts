@@ -6,12 +6,12 @@ import { FetchRequestHandler } from "./models/request_handlers/fetch_request_han
 
 const server: net.Server = net.createServer((connection: net.Socket) => {
   const requestHandlerCenter = new KafkaRequestHandlerCenter();
+
   requestHandlerCenter
     .registerHandler(new APIVersionRequestHandler())
     .registerHandler(new DescribeTopicPartitionRequestHandler())
     .registerHandler(new FetchRequestHandler());
 
-  // Handle connection
   connection.on("data", (data: Buffer) => {
     const response = requestHandlerCenter.handleRequest(data);
     connection.write(response);
